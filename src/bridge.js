@@ -761,6 +761,7 @@ function loadConfig() {
         setStickerRemark: false,
         stickerNote: true,
         collectSticker: true,
+        fetchSticker: true,
         getSelfImage: true
       },
       wake: {
@@ -819,6 +820,10 @@ function loadConfig() {
           maxPerMinute: 2,         // 每分钟最多收藏次数
           maxPerHour: 10,          // 每小时最多收藏次数
           maxRemarkChars: 20       // 收藏时备注最大长度
+        },
+        fetch: {
+          enabled: true,           // AI 从网上抓图入库总开关
+          maxBytes: 8388608        // 单张入库图片字节上限（默认 8MB）
         }
       },
       proactive: {
@@ -1895,9 +1900,48 @@ async function main() {
     return stickerEntries.find((e) => e.id === entry.id) || null;
   }
 
-  // 收藏聊天里的一张表情（add_custom_face），并按 AI 看到的含义写简短备注（modify_custom_face）。
-  async function collectStickerV2(key, messageRef, remark) {
+  // 从网上抓一张表情图加入 QQ 收藏表情（add_custom_face），可选写备注。
+  // 与 collectStickerV2 共用「收藏」额度（stickerCollectTimes）：网图入库和偷群友图
+  // 是同一类行为，频率上限合在一起防刷。下载在桥接内用 safeFetchBuffer 完成
+  // （SSRF 防护 + PNG/JPEG/GIF/WebP 魔数校验 + 字节上限），不把 URL 交给网关重新抓取。
+  async function fetchStickerV2(key, imageUrl, note) {
     const assertSendAllowed = captureSendGuard(key);
+    let parsed;
+    try { parsed = new URL(String(imageUrl)); } catch { throw new Error('url 格式无效'); }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`仅允许 http/https 图片地址（收到 ${parsed.protocol}//）`);
+    }
+    const fetchCfg = cfg.socialV2?.sticker?.fetch ?? {};
+    const maxBytes = Math.max(64 * 1024, Number(fetchCfg.maxBytes) || 8 * 1024 * 1024);
+    let image;
+    try {
+      image = await safeFetchBuffer(String(imageUrl), maxBytes);
+    } catch (error) {
+      throw new Error(`图片抓取失败：${error?.message ?? error}`);
+    }
+    assertSendAllowed();
+    const addRes = await bot.request('add_custom_face', { file: 'base64://' + image.buffer.toString('base64') });
+    if (!addRes || addRes.status !== 'ok' || addRes.retcode !== 0) {
+      throw new Error(`add_custom_face 失败: ${addRes?.wording || addRes?.retcode || 'unknown'}`);
+    }
+    const emojiId = String(addRes.data?.emoji_id || '');
+    if (!emojiId) throw new Error('add_custom_face 未返回 emoji_id');
+    const maxRemarkChars = Math.max(1, Number(cfg.socialV2?.sticker?.collect?.maxRemarkChars) || 20);
+    const cleanRemark = String(note ?? '').trim().slice(0, maxRemarkChars);
+    if (cleanRemark) {
+      assertSendAllowed();
+      const modRes = await bot.request('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark });
+      if (!modRes || modRes.status !== 'ok' || modRes.retcode !== 0) {
+        log(`[sticker] 网图入库成功但备注失败 ${emojiId}: ${modRes?.wording || modRes?.retcode || 'unknown'}`);
+      }
+    }
+    const synced = await syncStickerLibrary(true);
+    const entry = findSticker(synced?.entries ?? stickerEntries, emojiId);
+    return { emojiId, entry: entry || null, remark: cleanRemark, image };
+  }
+
+  // 收藏聊天里的一张表情（add_custom_face），并按 AI 看到的含义写简短备注（modify_custom_face）。
+  async function collectStickerV2(key, messageRef, remark) {    const assertSendAllowed = captureSendGuard(key);
     const st = getSocialV2State(key);
     const found = (st.recentMessages || []).find((m) => m && (String(m.seq) === String(messageRef) || (m.messageId && String(m.messageId) === String(messageRef))));
     if (!found) throw new Error('找不到这条消息，请确认 messageId/seq 有效且属于当前会话');
@@ -5601,6 +5645,61 @@ async function main() {
             saveSocialV2State();
             log(`[sticker] AI 收藏表情失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `收藏表情失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // ── 网图入库（AI 自己找表情包）：下载 → add_custom_face → 同步本地库 ──
+        // 鉴权/限频与 collect-sticker 同族：与偷群友图共用 stickerCollectTimes 额度。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/fetch-sticker') {
+          if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const imageUrl = String(body.url ?? '').trim();
+          const note = String(body.note ?? body.remark ?? '').trim();
+          if (!key || !imageUrl) { sendJson({ ok: false, error: 'key 和 url 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('fetchSticker')) { sendJson({ ok: false, error: '工具未启用：qq_fetch_sticker' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          if (cfg.socialV2?.sticker?.fetch?.enabled === false) { sendJson({ ok: false, error: 'AI 网图入库功能已关闭' }, 403); return; }
+          const st = getSocialV2State(key);
+          const collectCfg = cfg.socialV2?.sticker?.collect ?? {};
+          const now = Date.now();
+          const maxPerMinute = Math.max(0, Number(collectCfg.maxPerMinute) || 0);
+          const maxPerHour = Math.max(0, Number(collectCfg.maxPerHour) || 0);
+          const recentMinute = (st.stickerCollectTimes || []).filter((t) => now - t < 60000).length;
+          const recentHour = (st.stickerCollectTimes || []).filter((t) => now - t < 3600000).length;
+          if ((maxPerMinute > 0 && recentMinute + 1 > maxPerMinute) || (maxPerHour > 0 && recentHour + 1 > maxPerHour)) {
+            sendJson({ ok: false, error: '入库/收藏表情太频繁了，请过一会儿再试' }, 429);
+            return;
+          }
+          // 预占额度防并发绕过；失败回滚（与 collect 相同手法）。
+          st.stickerCollectTimes = st.stickerCollectTimes || [];
+          st.stickerCollectTimes.push(now);
+          if (st.stickerCollectTimes.length > 500) st.stickerCollectTimes = st.stickerCollectTimes.slice(-500);
+          try {
+            const result = await fetchStickerV2(key, imageUrl, note);
+            saveSocialV2State();
+            log(`[sticker] AI 网图入库 ${key}: ${result.emojiId}${result.remark ? '（备注：' + result.remark + '）' : ''}`);
+            appendActivity(`${key} [sticker] AI 网图入库：${result.remark || result.emojiId}`);
+            // 把图片本体带回给模型（视觉确认入库的是什么）；过大的图只报字节数。
+            const buf = result.image?.buffer;
+            const payload = { ok: true, key, sticker: result.entry, emojiId: result.emojiId, remark: result.remark };
+            if (buf && buf.length <= 2 * 1024 * 1024) {
+              payload.image = { mimeType: mimeFromBuffer(buf), data: buf.toString('base64') };
+            } else if (buf) {
+              payload.imageBytes = buf.length;
+              payload.note = '图片过大，未附带预览；可先用 qq_get_sticker_image 查看';
+            }
+            sendJson(payload);
+          } catch (error) {
+            const idx = st.stickerCollectTimes.indexOf(now);
+            if (idx >= 0) st.stickerCollectTimes.splice(idx, 1);
+            if (st.stickerCollectTimes.length > 500) st.stickerCollectTimes = st.stickerCollectTimes.slice(-500);
+            saveSocialV2State();
+            log(`[sticker] AI 网图入库失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `网图入库失败：${error?.message ?? error}` }, 500);
           }
           return;
         }

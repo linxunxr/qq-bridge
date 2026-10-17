@@ -51,6 +51,117 @@ test('empty searches are rejected without calling the transport', async () => {
   assert.equal(result.isError, true);
 });
 
+// 回归：cn.bing.com 会对无 Cookie 客户端间歇性下发「空壳结果页」（HTTP 200、框架
+// 齐全、0 条 b_algo；无 JS 客户端的相关性还会被降级——搜新闻返回黄历/天气）。
+// 新策略 RSS 优先：cn 空壳时换 www 的 RSS 输出兜底，能拿到结果就正常返回，
+// 不再让模型把「被节流」报告成「网上什么都没有」（2026-10-16 群聊实录）。
+test('throttled cn pages fall back to www RSS output', async () => {
+  const urls = [];
+  const callTool = loadWebTools(async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.startsWith('https://cn.bing.com/')) {
+      return { statusCode: 200, body: '<html><head><title>fixture - 搜索</title></head><body><ol id="b_results"></ol></body></html>' };
+    }
+    if (u.includes('format=rss')) {
+      return {
+        statusCode: 200,
+        body: '<rss><channel><title>必应：fixture</title>'
+          + '<item><title><![CDATA[Real news from RSS]]></title><link>https://example.com/news</link>'
+          + '<description><![CDATA[Fixture snippet]]></description></item></channel></rss>',
+      };
+    }
+    assert.fail('RSS 兜底已命中，不应再退到 HTML：' + u);
+  });
+  const result = await callTool('web_search', { query: '今日新闻' });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.results[0]?.title, 'Real news from RSS', 'www RSS 兜底的结果应被采用');
+  assert.equal(parsed.results[0]?.url, 'https://example.com/news');
+  assert.equal(urls.length, 2, 'cn RSS 首查 + www RSS 兜底，共两次');
+  assert.ok(urls[0].includes('format=rss'), '首查即走 RSS');
+  assert.equal(new URL(urls[1]).searchParams.get('setmkt'), 'zh-CN');
+});
+
+// 回归：RSS 两级都空时仍能退回 HTML 解析（防 RSS 输出某天下线/变形）。
+test('HTML parsing remains as the last fallback when RSS yields nothing', async () => {
+  const callTool = loadWebTools(async (url) => {
+    if (String(url).includes('format=rss')) return { statusCode: 200, body: '<rss><channel></channel></rss>' };
+    if (String(url).startsWith('https://www.bing.com/')) {
+      return { statusCode: 200, body: '<li class="b_algo"><h2><a href="https://example.com/html">HTML fallback</a></h2><p>Fixture snippet</p></li>' };
+    }
+    return { statusCode: 200, body: '<ol id="b_results"></ol>' };
+  });
+  const result = await callTool('web_search', { query: '今日新闻' });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.results[0]?.title, 'HTML fallback');
+});
+
+// 回归：image_search 从 Bing 图片搜索页的 m 属性里抽 murl 直链（供表情包入库用），
+// 仍走共享 safeFetch 传输；两个前台都空时带 note 而不是裸空列表。
+test('image_search extracts murl direct links from the Bing images page', async () => {
+  const calls = [];
+  const callTool = loadWebTools(async (url, maxChars) => {
+    calls.push({ url: String(url), maxChars });
+    return {
+      statusCode: 200,
+      body: '<div class="iuscp" m="{&quot;murl&quot;:&quot;https://pic.example.com/a%2Fcat1.jpg&quot;,&quot;turl&quot;:&quot;t1&quot;}" m="{&quot;murl&quot;:&quot;https://pic.example.com/cat2.gif&quot;}"></div>',
+    };
+  });
+  const result = await callTool('image_search', { query: '猫猫 表情包' });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.images[0], 'https://pic.example.com/a/cat1.jpg', 'murl 应解码后返回');
+  assert.equal(parsed.images[1], 'https://pic.example.com/cat2.gif');
+  assert.ok(calls[0].url.includes('/images/search?'), '应请求 Bing 图片搜索');
+  assert.equal(calls[0].maxChars, 512000, '沿用受限传输链路的读取上限');
+});
+
+test('image_search falls back across Bing fronts and reports a note on total emptiness', async () => {
+  const hosts = [];
+  const callTool = loadWebTools(async (url) => {
+    hosts.push(new URL(String(url)).host);
+    return { statusCode: 200, body: '<html><body>no results</body></html>' };
+  });
+  const result = await callTool('image_search', { query: '猫猫 表情包' });
+  const parsed = JSON.parse(result.content[0].text);
+  assert.deepEqual(parsed.images, []);
+  assert.match(parsed.note, /没有返回结果|限流/);
+  assert.deepEqual(hosts, ['www.bing.com', 'cn.bing.com'], 'www 失败后应换 cn 前台');
+});
+
+// 回归：qq_fetch_sticker 把网图入库请求发给桥接端点，参数与会话令牌完整传递；
+// 桥接侧错误（ok:false / HTTP 错误）必须作为工具错误浮出，不能假装入库成功。
+test('qq_fetch_sticker posts to the bridge endpoint and surfaces failures', async () => {
+  const seen = [];
+  const fixtureConfig = { socialV2: { sticker: { enabled: true }, tools: { fetchSticker: true } } };
+  const okTool = loadSnowlumaTools(async (url, init) => {
+    seen.push({ url: String(url), body: init?.body });
+    return Response.json({ ok: true, emojiId: 'EMOJI1', sticker: { id: 'EMOJI1', desc: '猫猫' }, remark: '猫猫' });
+  }, fixtureConfig);
+  const result = await okTool('qq_fetch_sticker', { key: 'group:771440459', token: 'tok', url: 'https://pic.example.com/cat.gif', note: '猫猫' });
+  assert.equal(seen[0].url.includes('/api/socialV2/fetch-sticker'), true);
+  const body = JSON.parse(seen[0].body);
+  assert.equal(body.key, 'group:771440459');
+  assert.equal(body.url, 'https://pic.example.com/cat.gif');
+  assert.equal(body.note, '猫猫');
+  assert.notEqual(result.isError, true);
+
+  const failTool = loadSnowlumaTools(async () => Response.json({ ok: false, error: '入库/收藏表情太频繁了' }), fixtureConfig);
+  const denied = await failTool('qq_fetch_sticker', { key: 'group:771440459', token: 'tok', url: 'https://pic.example.com/cat.gif' });
+  assert.equal(denied.isError, true, '桥接拒绝必须浮出为工具错误');
+  assert.match(denied.content[0].text, /太频繁/);
+});
+
+// 回归：三次都拿到「HTTP 200 但 0 条结果」时，不能返回看似权威的裸空列表——
+// 要带 note 说明可能被限流，让模型说「暂时搜不到」而不是「什么都没有」。
+test('all-empty Bing responses return a throttling note instead of a bare empty list', async () => {
+  const callTool = loadWebTools(async () => ({ statusCode: 200, body: '<ol id="b_results"></ol>' }));
+  const result = await callTool('web_search', { query: '今日新闻' });
+  assert.notEqual(result.isError, true, 'HTTP 层都正常，不作为工具错误');
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.results.length, 0);
+  assert.match(parsed.note, /限流|没有返回结果/);
+});
+
 /**
  * 用假 transport 加载 mcp-snowluma-safe.js，拿到它的工具回调。
  * 只需要把 fetch（桥接 API / OneBot HTTP）、McpServer、zod、两个本地纯模块塞进上下文。

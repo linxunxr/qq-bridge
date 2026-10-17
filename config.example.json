@@ -151,6 +151,7 @@
       "setStickerRemark": false,
       "stickerNote": true,
       "collectSticker": true,
+      "fetchSticker": true,
       "getSelfImage": true,
       "sendVoice": false
     },
@@ -227,6 +228,10 @@
         "maxPerMinute": 2,
         "maxPerHour": 10,
         "maxRemarkChars": 20
+      },
+      "fetch": {
+        "enabled": true,
+        "maxBytes": 8388608
       }
     },
     "voice": {

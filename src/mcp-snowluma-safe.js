@@ -219,6 +219,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_sticker_image: 'getStickerImage',
   qq_send_sticker: 'sendSticker',
   qq_collect_sticker: 'collectSticker',
+  qq_fetch_sticker: 'fetchSticker',
   qq_get_self_image: 'getSelfImage',
   qq_sticker_note: 'stickerNote',
   qq_set_sticker_remark: 'setStickerRemark',
@@ -1030,6 +1031,41 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectStic
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `收藏表情失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.fetchSticker !== false) {
+  server.tool(
+    'qq_fetch_sticker',
+    '从网上抓一张表情图加入你的 QQ 收藏表情（自己找表情包）。先用 mcp__web-search-safe__image_search 搜「xxx 表情包」拿到图片直链，再把这个直链交进来；返回的图片会直接进入上下文——确认这张图合适再用 qq_send_sticker 发，不合适就别发（入库的图可在 QQ 客户端里删）。下载由桥接带 SSRF 防护与大小校验完成，仅支持 http/https 直链；与偷图共用频率上限，别频繁入库。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      url: z.string().describe('图片直链（http/https，来自 image_search 的结果）'),
+      note: z.string().optional().describe('入库备注，最多 20 字，例如「猫猫歪头 万能回复」')
+    },
+    async ({ key, token, url, note }) => {
+      try {
+        const data = await agentApi('/api/socialV2/fetch-sticker', {
+          method: 'POST',
+          headers: { 'x-agent-token': token },
+          body: JSON.stringify({ key, url: String(url), note: note || '' }),
+          timeoutMs: 120000
+        });
+        if (!data?.image?.data || !data?.image?.mimeType) {
+          const text = data?.imageBytes ? `已入库（${Math.round(data.imageBytes / 1024)}KB，图片过大未附带预览）` : '已入库（未附带预览）';
+          return { content: [{ type: 'text', text: text + '：' + JSON.stringify({ sticker: data?.sticker ?? null, emojiId: data?.emojiId }) }] };
+        }
+        return {
+          content: [
+            { type: 'text', text: `已入库${data?.remark ? '（备注：' + data.remark + '）' : ''}，图片内容：` },
+            { type: 'image', mimeType: data.image.mimeType, data: data.image.data }
+          ]
+        };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `网图入库失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

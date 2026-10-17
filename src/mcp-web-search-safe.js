@@ -54,14 +54,121 @@ function parseBingResults(html) {
     if (urlStr && title) results.push({ title, url: urlStr, snippet });
     if (results.length >= 8) break;
   }
-  return { query, results };
+  return results;
+}
+
+// 解析 Bing 的 RSS 输出（`format=rss`）：item/title/link/description，稳定且面向程序。
+function stripCdata(s) {
+  return String(s ?? '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+}
+
+function parseBingRss(xml) {
+  const results = [];
+  for (const block of xml.split('<item>').slice(1)) {
+    const end = block.indexOf('</item>');
+    const item = end >= 0 ? block.slice(0, end) : block;
+    const titleMatch = item.match(/<title>([\s\S]*?)<\/title>/i);
+    const linkMatch = item.match(/<link>([\s\S]*?)<\/link>/i);
+    const descMatch = item.match(/<description>([\s\S]*?)<\/description>/i);
+    const title = titleMatch ? decodeHtml(stripCdata(titleMatch[1])) : '';
+    const urlStr = linkMatch ? decodeHtml(stripCdata(linkMatch[1])).trim() : '';
+    const snippet = descMatch ? decodeHtml(stripCdata(descMatch[1])) : '';
+    if (urlStr && title) results.push({ title, url: urlStr, snippet });
+    if (results.length >= 8) break;
+  }
+  return results;
+}
+
+async function fetchBingPage(host, query, { rss = false, extraParams = {} } = {}) {
+  const url = new URL(`https://${host}/search`);
+  url.searchParams.set('q', query);
+  if (rss) url.searchParams.set('format', 'rss');
+  for (const [key, value] of Object.entries(extraParams)) url.searchParams.set(key, value);
+  // 搜索也使用同一条受限传输链路，重定向必须重新校验，正文最多 512K 字符。
+  const res = await safeFetch(url.toString(), 512000);
+  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`搜索服务 HTTP ${res.statusCode}`);
+  return rss ? parseBingRss(res.body) : parseBingResults(res.body);
+}
+
+// cn.bing.com 的 HTML 结果页对无 Cookie 的程序化客户端有**两副面孔**（2026-10-16
+// 实测）：① 间歇性下发「空壳页」——HTTP 200、框架齐全，但 0 条 b_algo（~84.5KB vs
+// 正常 ~97KB，会连续几次又在约 45s 后自愈，www 前台不受影响）；② 即使有结果，无 JS
+// 客户端拿到的 SERP 相关性也常被降级（搜「今日热点新闻」返回黄历/天气）。同一条链路
+// 上加 `format=rss` 则两者皆无——RSS 稳定输出 10 条且是正常 organic 结果。因此：
+//   RSS(cn) → RSS(www) → HTML(cn) → HTML(www) 逐级兜底（同为 Bing，不新增数据出机面）；
+//   全部拿不到结果时不再返回看似权威的裸空列表，而是带 note 说明「可能被限流」，
+//   让模型能说「暂时搜不到」而不是把节流报告成「网上什么都没有」（群聊实录翻过车）。
+async function bingSearch(query) {
+  const attempts = [
+    { host: 'cn.bing.com', waitMs: 0, rss: true },
+    { host: 'www.bing.com', waitMs: 1000, rss: true, extraParams: { setmkt: 'zh-CN' } },
+    { host: 'cn.bing.com', waitMs: 1000, rss: false },
+    { host: 'www.bing.com', waitMs: 0, rss: false, extraParams: { setmkt: 'zh-CN' } },
+  ];
+  let sawEmptyPage = false;
+  let lastError = null;
+  for (const { host, waitMs, rss, extraParams } of attempts) {
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    try {
+      const results = await fetchBingPage(host, query, { rss, extraParams });
+      if (results.length > 0) return { query, results };
+      sawEmptyPage = true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  // 四次全是网络/HTTP 错误：维持旧行为——作为工具错误抛出，模型知道搜索失败。
+  // 只要拿到过一次「HTTP 200 但空结果」的空页，就按「暂时无结果」而不是失败上报。
+  if (lastError && !sawEmptyPage) throw lastError;
+  return {
+    query,
+    results: [],
+    note: lastError
+      ? `搜索服务暂时没有返回结果（可能被 Bing 限流；最后一次错误：${lastError.message}）`
+      : '搜索服务暂时没有返回结果（可能被 Bing 限流，稍后重试）',
+  };
+}
+
+// Bing 图片搜索的结果页把每条结果的元数据放在元素的 m="…" 属性里（HTML 转义的
+// JSON），其中 murl 是原图直链。不支持 format=rss（返回的是 HTML 页），所以只能
+// 从 HTML 里抽；www 与 cn 两个前台都试，空结果时换下一个（与 web_search 的
+// 空壳节流是同类现象）。
+function extractBingImageUrls(html, limit = 12) {
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/murl&quot;:&quot;(https?:\/\/[^&]+)&quot;/g)) {
+    let u = m[1];
+    try { u = decodeURIComponent(u); } catch {}
+    if (seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+async function bingImageSearch(query) {
+  for (const host of ['www.bing.com', 'cn.bing.com']) {
+    const url = new URL(`https://${host}/images/search`);
+    url.searchParams.set('q', query);
+    if (host === 'www.bing.com') url.searchParams.set('setmkt', 'zh-CN');
+    try {
+      const res = await safeFetch(url.toString(), 512000);
+      if (res.statusCode < 200 || res.statusCode >= 300) continue;
+      const images = extractBingImageUrls(res.body);
+      if (images.length > 0) return { query, images };
+    } catch { /* 换下一个前台 */ }
+  }
+  return { query, images: [], note: '图片搜索暂时没有返回结果（可能被 Bing 限流，稍后重试；也可以换个更具体的关键词，如「xxx 表情包」）' };
 }
 
 const server = new McpServer({ name: 'web-search-safe', version: '0.2.0-r3' });
 
+
+
 server.tool(
   'web_search',
-  '只读搜索网络用语/梗/黑话的含义，返回 Bing 搜索结果（标题/URL/摘要）。仅用于理解词义，不执行任何本地操作。',
+  '只读搜索网络用语/梗/黑话的含义，返回 Bing 搜索结果（标题/URL/摘要）。仅用于理解词义，不执行任何本地操作。结果为空且带 note 字段时表示搜索服务暂时受限（如被限流），应如实说「暂时搜不到」，不要据此断定「网上没有相关内容」。',
   { query: z.string().describe('要搜索确认的网络用语/黑话/梗') },
   async ({ query }) => {
     const clean = sanitizeQuery(query);
@@ -74,6 +181,27 @@ server.tool(
     } catch (error) {
       return {
         content: [{ type: 'text', text: `搜索失败：${error?.message ?? error}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
+  'image_search',
+  '只读搜索图片，返回候选图片的 http(s) 直链。主要用于找表情包素材：搜「xxx 表情包」挑一条直链，交给 mcp__snowluma__qq_fetch_sticker 收入 QQ 收藏表情。不执行任何本地操作。',
+  { query: z.string().describe('图片搜索词，如「猫猫 歪头 表情包」') },
+  async ({ query }) => {
+    const clean = sanitizeQuery(query);
+    if (!clean) {
+      return { content: [{ type: 'text', text: '查询词为空，已拒绝。' }], isError: true };
+    }
+    try {
+      const result = await bingImageSearch(clean);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: `图片搜索失败：${error?.message ?? error}` }],
         isError: true,
       };
     }
