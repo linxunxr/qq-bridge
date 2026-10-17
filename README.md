@@ -61,13 +61,15 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`（带 SSRF 防护），供 agent 查网络用语/资料。
     ⚠️ 它会把**搜索关键词发给 Bing**、并按模型决定抓取公网 URL；**黑话学习默认开启**，会拿群聊里提取的词条去搜。
     数据出机清单见 [LICENSE](LICENSE) 的「数据出机清单」，不需要就关掉黑话自动研究（`slang.autoResearch`）。
+  - `tablet`（桥接自带 `src/mcp-tablet.js`，**默认关闭**）：管理员通过 DevEco Studio / hdc 连接的鸿蒙平板——`tablet_screenshot` 截图（图像进上下文）、`tablet_read_screen` 读屏、`tablet_tap`/`tablet_swipe`/`tablet_fling`/`tablet_key`/`tablet_text` 做点击/滑动/翻页/按键/输入、`tablet_open_url` 在平板浏览器打开网页（渲染后页面 + 平板登录态），可用来刷视频、看网页、查信息。**两层硬门禁**：`tablet.enabled`（注册期）+ 每次调用过桥接 `/api/tablet/auth`（会话令牌 → `tablet.allowConvKeys`，**默认仅管理员私聊**）。配置与权限模型见 [docs/guides/TABLET.md](docs/guides/TABLET.md)。
+  - `pc`（桥接自带 `src/mcp-pc.js`，**默认关闭**）：控制**本机**——`pc_screenshot` 截屏、`pc_click`/`pc_drag`/`pc_scroll` 鼠标、`pc_key`（扫描码注入，游戏可识别）/`pc_text` 键盘、`pc_window` 窗口管理；典型用途是回合制/慢节奏游戏（**网游勿用，反作弊封号风险**）。纯 JS 实现（PowerShell + SendInput P/Invoke，不引入原生 npm 依赖），门禁与 tablet 同构（`pc.enabled` + `/api/pc/auth` → `pc.allowConvKeys` 默认仅管理员私聊）。见 [docs/guides/PC.md](docs/guides/PC.md)。
 - **会话模型**：每个 QQ 会话（私聊/群）对应一个独立的 DSH 会话，统一归组到「QQ 聊天」工作区（不再散落未分组）；映射持久化在 `state/sessions.json`
 - **性格定制**：QQ 会话默认使用 `qq-chat` agent preset，`reserved2` 使用 `qq-chat-v2`。DSH 0.1.7 起 preset 不再是 `~/.dsh/.agent-presets/<名>/` 目录，而是 `plugins/qq-agent-presets/` bundle 生成并插入 profile 的一条 `@deepseek-ai/dsh-agent-preset` 行（重启 DSH 后生效）；人格与默认 DSH 一致（coding agent），仅附加 QQ 场景规则；**角色扮演**是可选机制——由控制台或管理端设置 `state/current-role.json` 注入（群友无法更改）
 - **本地控制台**：桥接自带 Web 控制台 `http://127.0.0.1:3100`——左侧按操作任务分为「运行总览 / 会话与审批 / 人格与角色 / 二代仿真 / 一代仿真 / 黑话词库 / 令牌与花费 / 访问与安全 / 调试与运维 / 工具参考」十个页面，右上角搜索框可跨页定位任意功能项；支持**浅色 / 深色双主题**（顶栏一键切换，未选择时跟随系统）；切换运行模式（chat / closed-agent / reserved / reserved2）、设置角色、静默开关、查看活动日志、修改管理员/控制台令牌，全部即时生效；访问需要令牌（`config.json` 的 `consoleToken`，未配置时自动生成并打印在启动日志；控制台内可手动修改或重新生成）
   - **令牌与花费看板**：实时显示 AI 的 token 消耗与折算金额（元），可下钻到**每个群 / 每个好友 / 每一轮对话**（轮次、步数、缓存命中/未命中输入、输出、命中率、花费、峰谷时段），并有**按时间的消耗走势图**（24 小时 / 3 天 / 7 天 / 30 天，柱子按高峰/空闲着色，一眼看出什么时候烧得凶、哪几个小时是 2 倍价）。累计总量取自 DSH 的 `tokenUsage` 投影（精确，含桥接启动前的历史），逐轮明细由 `assistant/message` 的 `usage` 折叠而来；金额按 DeepSeek 官方价目表折算并区分**高峰 / 空闲时段**（高峰单价为空闲的 2 倍，已内置中国法定节假日）。详见 [docs/guides/TOKEN_USAGE_CONSOLE.md](docs/guides/TOKEN_USAGE_CONSOLE.md)
   - **人格（角色扮演）管理**：列表点选即可载入查看/编辑提示词，支持新建、保存修改、改名（自动重命名文件）、另存为副本、删除；超过注入上限或含一代专用指令会实时提示
   - **两层提示词可分别查看与修改**：「仿真提示词」（预设内置，管行为与协议，保存后同步到 DSH，需重启生效）与「人格提示词」（`roles/*.md`，管人设与语气，保存即生效）；仿真层保存前做安全不变量校验与自动备份，可一键还原
-  - **DSH 思考强度**：默认 `max`，可选 `high` / `low`，档位从 DSH 实际公布的能力读取，保存后下一条消息生效；控制台会明示该设置同时写入 DSH 全局默认（`~/.dsh/settings.yaml`）
+  - **DSH 思考强度**：默认 `max`，可选 `high` / `low` / `none`（跟随默认=不指定，路由别名模型用），档位从 DSH 实际公布的能力读取，保存后下一条消息生效；控制台会明示该设置同时写入 DSH 全局默认（`~/.dsh/settings.yaml`）
 - **运行模式**：
   - `chat`：白名单群 + 白名单私聊 → qq-chat 安全聊天
   - `closed-agent`：仅私聊 owner（config.json 的 ownerQQ，可在控制台设置）→ 完整工具（默认用 DSH 自己声明的默认 preset，即 `standard`；可在控制台「closed-agent preset」下拉改为任意 DSH preset），可在 QQ 上操控 DSH
@@ -112,6 +114,8 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `snowluma.followDiscoveredEndpoint` | 默认 `true`。换 QQ 账号后 token 与端口都会变，桥接会自愈：重新发现并**跟随** SnowLuma 的端点（同时写回 `config.json`）。**想跑第二个实例 / 指向另一份 SnowLuma 安装（多账号、测试）时设为 `false`** —— 那时只自愈 token，绝不动 URL，也不写回 URL。详见「已知行为」 |
 | `snowluma.silenceWarnMs` | 上游静默告警阈值（毫秒），默认 `600000`（10 分钟）。已连接但这么久没收到任何事件包（含心跳）时打警告；这只是**提示**，不确定性的判断交给 `good` |
 | `snowluma.launcherPath` / `homeDir` | SnowLuma 安装目录（用于 token/端点自发现）。⚠️ 桥接**不会**启动或停止 SnowLuma（见 `LICENSE`） |
+| `tablet.enabled` / `tablet.hdcPath` / `tablet.target` / `tablet.allowConvKeys` | 鸿蒙平板工具（默认关闭）：`enabled` 总开关；`hdcPath` 是 DevEco Studio 的 hdc.exe 绝对路径（装在默认位置或 PATH 有 hdc 时可留空）；`target` 填设备序列号（无线调试形如 `192.168.3.27:36271`，端口随平板重启变化）；`allowConvKeys` 留空 = 仅管理员私聊可用。详见 [docs/guides/TABLET.md](docs/guides/TABLET.md) |
+| `pc.enabled` / `pc.allowConvKeys` | 电脑控制（默认关闭）：控制**本机**（截屏/键鼠/窗口，回合制游戏用）；门禁同 tablet，`allowConvKeys` 留空 = 仅管理员私聊。**网游勿用（反作弊封号风险）**。详见 [docs/guides/PC.md](docs/guides/PC.md) |
 | `agentPreset` | QQ 会话使用的 DSH agent preset，默认 `qq-chat`（改性格见下文） |
 | `socialV2.agentPreset` | `reserved2` 模式使用的 DSH agent preset，默认 `qq-chat-v2` |
 | `workspaceTitle` | QQ 会话在 DSH 界面中的归组名称，默认「QQ 聊天」 |

@@ -12,7 +12,9 @@
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | [guides/PROJECT_GUIDE.md](guides/PROJECT_GUIDE.md) | **权威项目说明书**（113 KB / 1450+ 行）：架构、内外核划分、数据流、配置全解、安全机制、调试与改进指南，含 2026-08-20 ~ 2026-09-11 的逐轮更新记录 | ✅ **唯一权威版本**（另一份同名精简版已归档到 legacy，见下） |
-| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
+| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与四个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
+| [guides/TABLET.md](guides/TABLET.md) | 鸿蒙平板工具（`mcp-tablet`）：让 QQ 会话 agent 截图/读屏/点击/滑动管理员已连接的平板，配置与两层硬门禁权限模型 | ✅ |
+| [guides/PC.md](guides/PC.md) | 电脑控制工具（`mcp-pc`）：截屏 + 扫描码键鼠注入 + 窗口管理（回合制游戏/一般操作），纯 JS 实现与同构门禁、反作弊边界 | ✅ |
 | [guides/VOICE.md](guides/VOICE.md) | 语音发送全解：独立工具（`voice-tool/` 的图形界面与命令行）、桥接 CLI、AI 工具、控制台面板，以及**工具拆出后的配置解析顺序** | ✅ 2026 整理时已更新（工具移到上一级 `voice-tool/`） |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |

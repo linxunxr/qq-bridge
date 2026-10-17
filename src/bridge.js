@@ -640,6 +640,19 @@ function loadConfig() {
       ...(file.dsh ?? {})
     },
     snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    // 鸿蒙平板工具（mcp-tablet）：桥接只消费 enabled / allowConvKeys（鉴权端点用）；
+    // hdcPath / target / maxScreenshotBytes 由 MCP server 自己读 config.json。
+    tablet: {
+      enabled: false,
+      allowConvKeys: [],
+      ...(file.tablet ?? {}),
+    },
+    // 电脑控制（mcp-pc）：与 tablet 同构。桥接只消费 enabled / allowConvKeys。
+    pc: {
+      enabled: false,
+      allowConvKeys: [],
+      ...(file.pc ?? {}),
+    },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'qq-chat',
@@ -3194,7 +3207,9 @@ async function main() {
             || url.pathname.startsWith('/api/socialV2/')
             || url.pathname.startsWith('/api/send/')
             || url.pathname.startsWith('/api/images/')
-            || url.pathname === '/api/authorize/read';
+            || url.pathname === '/api/authorize/read'
+            || url.pathname === '/api/tablet/auth'
+            || url.pathname === '/api/pc/auth';
           if (!agentAllowed) {
             sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
             return;
@@ -6479,6 +6494,84 @@ async function main() {
             return;
           }
           sendJson({ ok: true, key });
+          return;
+        }
+        // ── 平板工具鉴权端点（mcp-tablet 的控制类工具每次调用都先来这里） ──────
+        // 设计与 /api/authorize/read 同族，但方向相反：模型不知道自己所在会话的
+        // key，所以这里用令牌反查会话（与 isLiveAgentToken 同一数据源），再按
+        // tablet.allowConvKeys（默认仅 private:<ownerQQ>）做硬白名单。
+        // 群聊会话、伪造/过期令牌、tablet.enabled 未开、当前模式不放行该会话
+        // ——四种情况一律 403；桥接不在线时 MCP 侧直接 fail-closed。
+        if (req.method === 'POST' && url.pathname === '/api/tablet/auth') {
+          const body = await readBody();
+          const token = String(body.token ?? '').trim();
+          let convKey = null;
+          if (token) {
+            for (const [k, st] of socialV2.conversations) {
+              if (st?.agentToken && tokenEq(token, st.agentToken)) { convKey = k; break; }
+            }
+          }
+          if (!convKey) {
+            sendJson({ ok: false, error: '缺少或无效的会话令牌：平板工具仅在管理员授权的会话可用（一代模式没有会话令牌，无法使用）' }, 403);
+            return;
+          }
+          if (cfg.tablet?.enabled !== true) {
+            sendJson({ ok: false, error: '平板工具未启用（config.json 的 tablet.enabled）' }, 403);
+            return;
+          }
+          const keyMatch = /^(group|private):(\d+)$/.exec(convKey);
+          if (!keyMatch || !modeAllowed(convKey, keyMatch[1], Number(keyMatch[2]), cfg, currentMode)) {
+            sendJson({ ok: false, error: '当前模式不允许该会话使用平板工具' }, 403);
+            return;
+          }
+          const allow = (Array.isArray(cfg.tablet?.allowConvKeys) && cfg.tablet.allowConvKeys.length)
+            ? cfg.tablet.allowConvKeys.map(String)
+            : (cfg.ownerQQ ? [`private:${cfg.ownerQQ}`] : []);
+          if (!allow.includes(convKey)) {
+            appendActivity(`${convKey} [tablet] 拒绝：会话不在 tablet.allowConvKeys`);
+            sendJson({ ok: false, error: `该会话（${convKey}）不在平板工具白名单（config.json 的 tablet.allowConvKeys，默认仅管理员私聊）` }, 403);
+            return;
+          }
+          appendActivity(`${convKey} [tablet] 授权通过`);
+          sendJson({ ok: true, key: convKey });
+          return;
+        }
+        // ── 电脑控制鉴权端点（mcp-pc 的控制类工具每次调用都先来这里） ─────────
+        // 与 /api/tablet/auth 同构：会话令牌反查会话 → pc.enabled → 模式准入 →
+        // pc.allowConvKeys（默认仅 private:<ownerQQ>）。电脑是本机（桥接/DSH/QQ
+        // 所在主机），比平板更敏感，门禁语义与 tablet 完全一致、不放松。
+        if (req.method === 'POST' && url.pathname === '/api/pc/auth') {
+          const body = await readBody();
+          const token = String(body.token ?? '').trim();
+          let convKey = null;
+          if (token) {
+            for (const [k, st] of socialV2.conversations) {
+              if (st?.agentToken && tokenEq(token, st.agentToken)) { convKey = k; break; }
+            }
+          }
+          if (!convKey) {
+            sendJson({ ok: false, error: '缺少或无效的会话令牌：电脑工具仅在管理员授权的会话可用（一代模式没有会话令牌，无法使用）' }, 403);
+            return;
+          }
+          if (cfg.pc?.enabled !== true) {
+            sendJson({ ok: false, error: '电脑控制未启用（config.json 的 pc.enabled）' }, 403);
+            return;
+          }
+          const keyMatch = /^(group|private):(\d+)$/.exec(convKey);
+          if (!keyMatch || !modeAllowed(convKey, keyMatch[1], Number(keyMatch[2]), cfg, currentMode)) {
+            sendJson({ ok: false, error: '当前模式不允许该会话使用电脑工具' }, 403);
+            return;
+          }
+          const allow = (Array.isArray(cfg.pc?.allowConvKeys) && cfg.pc.allowConvKeys.length)
+            ? cfg.pc.allowConvKeys.map(String)
+            : (cfg.ownerQQ ? [`private:${cfg.ownerQQ}`] : []);
+          if (!allow.includes(convKey)) {
+            appendActivity(`${convKey} [pc] 拒绝：会话不在 pc.allowConvKeys`);
+            sendJson({ ok: false, error: `该会话（${convKey}）不在电脑控制白名单（config.json 的 pc.allowConvKeys，默认仅管理员私聊）` }, 403);
+            return;
+          }
+          appendActivity(`${convKey} [pc] 授权通过`);
+          sendJson({ ok: true, key: convKey });
           return;
         }
         // ── 图片/表情查询端点（MCP qq_get_message_images 走这里） ────────────

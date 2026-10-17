@@ -164,6 +164,15 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  // 平板工具（mcp-tablet）：命名空间进白名单 ≠ 人人可用——它自身还有两层硬门禁：
+  //   ① 注册期：config.json tablet.enabled !== true 时控制类工具根本不注册；
+  //   ② 调用期：每次调用先过桥接 /api/tablet/auth（会话令牌 → 会话 →
+  //      tablet.allowConvKeys，默认仅 private:<ownerQQ> 管理员私聊）。
+  // 见 src/mcp-tablet.js 头注释与 RULES.md「QQ 会话 agent 的硬边界」。
+  'mcp__tablet__',
+  // 电脑控制（mcp-pc）：与 tablet 完全同构的两层门禁（pc.enabled + /api/pc/auth
+  // → pc.allowConvKeys，默认仅管理员私聊）。电脑是本机，见 src/mcp-pc.js 头注释。
+  'mcp__pc__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

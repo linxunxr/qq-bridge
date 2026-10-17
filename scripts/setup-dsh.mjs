@@ -5,8 +5,8 @@
 //   1. 安装两套 agent preset：qq-chat、qq-chat-v2
 //      （DSH 0.1.7 机制：作为 qq-agent-presets bundle 的 patch 层插入
 //        @deepseek-ai/dsh-agent-preset 行；~/.dsh/.agent-presets/ 目录已不再被读取）
-//   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
-//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
+//   2. 在 DSH profile 的 cordis.patch.yml 中挂载四个 MCP server：
+//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe / mcp-tablet
 //   3. 在 profile package.json 中注册两个 bundle：qq-mode-console、qq-agent-presets
 //
 // 用法：
@@ -122,8 +122,8 @@ function yamlSingleQuote(s) {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
 
-// 由桥接托管的 MCP 条目 id：脚本对这三个 id 拥有所有权，可安全地按 id 增删。
-const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe'];
+// 由桥接托管的 MCP 条目 id：脚本对这些 id 拥有所有权，可安全地按 id 增删。
+const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe', 'mcp-tablet', 'mcp-pc'];
 
 function mcpEntries() {
   const node = process.execPath;
@@ -131,6 +131,11 @@ function mcpEntries() {
     'mcp-snowluma': { serverName: 'snowluma', script: path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'), toolCallTimeoutMs: 725000 },
     'mcp-snowluma-host': { serverName: 'snowluma-host', script: path.join(REPO_ROOT, 'src', 'mcp-host-server.js') },
     'mcp-web-search-safe': { serverName: 'web-search-safe', script: path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js') },
+    // 平板截图要走 桥接鉴权 + tconn 自愈 + screenCap + file recv，Wi-Fi 下偶发偏慢；
+    // DSH 默认 60s 工具超时在最差链路上可能不够。
+    'mcp-tablet': { serverName: 'tablet', script: path.join(REPO_ROOT, 'src', 'mcp-tablet.js'), toolCallTimeoutMs: 90000 },
+    // 电脑控制：每次操作 spawn powershell（含截屏编码），同样放宽超时。
+    'mcp-pc': { serverName: 'pc', script: path.join(REPO_ROOT, 'src', 'mcp-pc.js'), toolCallTimeoutMs: 90000 },
   };
   let out = '# === qq-bridge MCP BEGIN ===\n';
   out += '# 由 scripts/setup-dsh.mjs 维护；这段区块会被整体替换，请勿手工编辑内部条目。\n';

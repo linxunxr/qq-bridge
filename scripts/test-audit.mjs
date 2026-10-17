@@ -52,6 +52,11 @@ const tests = [
   //   · 静默检测不得冒充 hook 检测（心跳是 SnowLuma 本地定时器无条件发的）；
   //   · 客户端库版本不得低于 bot_status 出现的版本。
   'test-snowluma-upstream-health.mjs',
+  // 平板 MCP server：权限设计静态断言（x-agent-call、注册期开关、控制工具全要 token）
+  // + stdio 冒烟（无效令牌 fail-closed）。真机端到端不在离线回归里做。
+  'test-mcp-tablet.mjs',
+  // 电脑控制 MCP server：同 tablet 的静态断言 + stdio 冒烟（不动真鼠标键盘）。
+  'test-mcp-pc.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

@@ -21,6 +21,18 @@
     "launcherPath": "",
     "homeDir": ""
   },
+  "tablet": {
+    "enabled": false,
+    "hdcPath": "",
+    "target": "",
+    "allowConvKeys": [],
+    "maxScreenshotBytes": 4000000
+  },
+  "pc": {
+    "enabled": false,
+    "allowConvKeys": [],
+    "maxScreenshotBytes": 4000000
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",

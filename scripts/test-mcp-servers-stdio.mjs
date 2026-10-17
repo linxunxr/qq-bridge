@@ -12,6 +12,8 @@ const SERVERS = [
   { serverName: 'snowluma', script: 'src/mcp-snowluma-safe.js' },
   { serverName: 'snowluma-host', script: 'src/mcp-host-server.js' },
   { serverName: 'web-search-safe', script: 'src/mcp-web-search-safe.js' },
+  { serverName: 'tablet', script: 'src/mcp-tablet.js' },
+  { serverName: 'pc', script: 'src/mcp-pc.js' },
 ];
 
 let failures = 0;
