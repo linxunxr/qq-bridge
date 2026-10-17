@@ -535,10 +535,16 @@ let modelSelectionEpoch = 0;
 // 'off' 虽然合法（关闭思考），但 QQ 聊天助手依赖思考，控制台不提供该档。
 const REASONING_EFFORT_OPTIONS = ['low', 'high', 'max'];
 const REASONING_EFFORT_DEFAULT = 'max';
+// 「不指定思考强度」的规范值：selectModel 不发 reasoningEffort 字段。
+// 用途：omniroute 的 high-availability 这类路由别名在 DSH 模型目录里没有 reasoning 声明，
+// 任何显式档位都会被 session/model-unavailable 拒绝；这种模型只能不带头去选。
+const REASONING_EFFORT_NONE = 'none';
+const isNoEffort = (v) => v === '' || v === REASONING_EFFORT_NONE || v === 'default';
 function normalizeReasoningEffort(value) {
   const v = String(value ?? '').trim().toLowerCase();
+  if (isNoEffort(v)) return REASONING_EFFORT_NONE;
   if (!REASONING_EFFORT_OPTIONS.includes(v)) {
-    throw new Error(`思考强度只能是 ${REASONING_EFFORT_OPTIONS.join(' / ')}`);
+    throw new Error(`思考强度只能是 ${[...REASONING_EFFORT_OPTIONS, REASONING_EFFORT_NONE].join(' / ')}`);
   }
   return v;
 }
@@ -3898,8 +3904,16 @@ async function main() {
             provider,
             model,
             reasoningEffort: String(cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT),
-            options,
-            labels,
+            // 「none（跟随默认，不指定）」永远可选：路由别名模型（如 omniroute 的
+            // high-availability）在 DSH 目录里没有 reasoning 声明，只能不带档位选。
+            options: [REASONING_EFFORT_NONE, ...options.filter((o) => o !== REASONING_EFFORT_NONE)],
+            labels: {
+              [REASONING_EFFORT_NONE]: {
+                name: '跟随默认（不指定）',
+                description: 'selectModel 不发送思考强度，交给 DSH/路由的默认值；路由别名模型必须用这一档。',
+              },
+              ...labels,
+            },
             default: REASONING_EFFORT_DEFAULT,
             providerDefault,
             catalogSource,
@@ -7532,17 +7546,33 @@ async function main() {
     if (modelAppliedSessions.get(sessionId) === modelSelectionEpoch) return 'applied';
     const provider = String(cfg.dsh?.provider || 'deepseek-official');
     const model = String(cfg.dsh?.model || 'deepseek-flash');
-    const effort = String(cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT);
+    // none/留空 ⇒ 不发 reasoningEffort 字段：路由别名模型（如 omniroute 的
+    // high-availability）在 DSH 目录里没有 reasoning 声明，带任何档位都会被拒。
+    const effortRaw = String(cfg.dsh?.reasoningEffort ?? REASONING_EFFORT_DEFAULT).toLowerCase();
+    const effort = isNoEffort(effortRaw)
+      ? REASONING_EFFORT_NONE
+      : (REASONING_EFFORT_OPTIONS.includes(effortRaw) ? effortRaw : REASONING_EFFORT_DEFAULT);
+    const params = { sessionId, provider, model, ...(effort !== REASONING_EFFORT_NONE ? { reasoningEffort: effort } : {}) };
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        const result = unwrap(await api.sessions.selectModel({ sessionId, provider, model, reasoningEffort: effort }), 'session.selectModel');
+        const result = unwrap(await api.sessions.selectModel(params), 'session.selectModel');
         modelAppliedSessions.set(sessionId, modelSelectionEpoch);
         log(`已设置会话模型 ${sessionId} -> ${result.selected.provider}/${result.selected.model} (${result.selected.reasoningEffort ?? '默认'})`);
         return 'applied';
       } catch (error) {
         lastError = error;
-        log(`设置会话模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
+        const message = String(error?.message ?? error);
+        // 优雅降级：模型目录没声明思考档位时（路由别名常见），去掉档位立刻重试，
+        // 让「钉模型」本身成功——思考强度交给 DSH/路由默认，而不是整个放弃钉模型、
+        // 会话一直跑在 DSH 出厂默认上（旧日志里 112 条该错误的慢性根因）。
+        if (params.reasoningEffort && /does not support reasoning effort/i.test(message)) {
+          log(`设置会话模型失败 ${sessionId}: ${provider}/${model} 不支持思考档位 ${params.reasoningEffort}，去掉档位重试（思考强度交给 DSH/路由默认）`);
+          delete params.reasoningEffort;
+          attempt -= 1; // 降级重试不消耗常规重试次数；字段已删，至多发生一次
+          continue;
+        }
+        log(`设置会话模型失败 ${sessionId}（第 ${attempt}/2 次）: ${message}`);
         if (attempt < 2) await sleep(1000);
       }
     }
