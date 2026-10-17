@@ -206,6 +206,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
+  qq_speak: 'sendVoice',
   qq_list_voices: 'sendVoice',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
   // 在**调用期**一律 403，而这里不登记就等于"控制台显示已关闭、模型每次请求仍收到它的完整
@@ -1121,6 +1122,31 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `获取语音库失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'qq_speak',
+    '把一段文字直接合成语音（系统 TTS 中文女声）作为 QQ 语音条发出去——不依赖语音库预置音频。短句更像真人，标点和语气词影响停顿节奏；rate 可微调语速（-10~10）。受语音频率上限约束（与 qq_send_voice 共享额度），语音比文字更打扰：偶尔用、别连发；返回 verified=true 才代表语音确实落地。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      text: z.string().min(1).max(400).describe('要念出来的话（建议 1~2 句短句）'),
+      rate: z.number().int().min(-10).max(10).optional().describe('语速（-10 慢 ~ 10 快，默认 0）'),
+      readback: z.boolean().optional().describe('是否索取 QQ 转写文本（自己发的通常没有，默认 false）')
+    },
+    async ({ key, token, text, rate, readback }) => {
+      try {
+        const data = await agentApi('/api/socialV2/speak-voice', {
+          method: 'POST',
+          headers: { 'x-agent-token': token },
+          body: JSON.stringify({ key, text: String(text), rate: rate ?? undefined, readback: readback === true, token }),
+          timeoutMs: 180000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发语音失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

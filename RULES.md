@@ -35,11 +35,15 @@
 ## QQ 会话 agent 的硬边界
 
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
-2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*`、`mcp__tablet__*`、`mcp__pc__*` 五个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+   - **平板工具（`mcp__tablet__*`）有两层额外硬门禁**，命名空间进白名单的前提就是它们存在：① `tablet.enabled !== true` 时控制工具（截图/读屏/点击/滑动/按键/输入）在注册期就不存在；② 每次控制调用都先过桥接 `POST /api/tablet/auth`——会话令牌反查会话后必须命中 `tablet.allowConvKeys`（**默认仅 `private:<ownerQQ>` 管理员私聊**）。群聊会话、无令牌（一代模式）、桥接不在线一律拒绝（fail-closed）。平板工具能看/能操作的是**管理员自己连接的平板**，不涉及本机文件与命令执行；`scripts/test-mcp-tablet.mjs` 以静态断言钉住该权限设计。详见 [docs/guides/TABLET.md](docs/guides/TABLET.md)。
+   - **电脑控制（`mcp__pc__*`）与 tablet 同构的两层门禁**（`pc.enabled` 注册期 + `POST /api/pc/auth` 调用期 → `pc.allowConvKeys`，默认仅管理员私聊；`scripts/test-mcp-pc.mjs` 钉住）。⚠️ 电脑是**本机**（桥接/DSH/QQ 客户端所在主机）：这是「无本地工具」铁律的一个**显式、默认关闭、仅管理员私聊**的例外，例外面收敛在截屏/键鼠/窗口九个动作上——没有 `pc_run` 任意命令工具；注入用扫描码 SendInput 经 PowerShell P/Invoke 完成，npm 依赖树保持纯 JS。**网游勿用**（反作弊封号风险）。详见 [docs/guides/PC.md](docs/guides/PC.md)。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
    - **语音额外收紧**：`qq_send_voice` 只能发**语音库**（`socialV2.voice.dir`，默认 `qq-bridge/audio/`）里的文件，不能发任意本地路径、URL 或 base64（防 prompt injection 拿本机文件当语音外发）；另有独立的时长/体积/频率上限（`socialV2.voice.*`），额度与文本发送分开计数。详见 [docs/guides/VOICE.md](docs/guides/VOICE.md)。
+     - `qq_speak`（文字转语音直发）不读任何本地文件：文本（≤`voice.tts.maxChars`，默认 400 字）经桥接用系统 SAPI 合成临时 WAV，**发送后即删**，不进入长期语音库；鉴权/频率上限/落地校验与 `qq_send_voice` 完全一致（共享语音额度）。
+   - **表情包入库同理收紧**：`qq_fetch_sticker`（AI 自己找表情包）的图片下载在桥接内完成（`safeFetchBuffer`：SSRF 防护 + PNG/JPEG/GIF/WebP 魔数校验 + `sticker.fetch.maxBytes` 上限），不接受本地路径；入库与偷图（`qq_collect_sticker`）共用 `sticker.collect` 的频率上限，入库后返回图片本体供模型视觉确认，不合适不发即可。
 5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
 6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
 7. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。

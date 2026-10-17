@@ -245,7 +245,13 @@
       "defaultVolume": 1,
       "loudness": "normal",
       "ffmpegPath": "",
-      "autoReadback": true
+      "autoReadback": true,
+      "tts": {
+        "enabled": true,
+        "voice": "Microsoft Huihui Desktop",
+        "maxChars": 400,
+        "rate": 0
+      }
     },
     "proactive": {
       "enabled": true,

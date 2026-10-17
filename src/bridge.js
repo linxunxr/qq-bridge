@@ -10,7 +10,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn as childSpawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -907,6 +907,13 @@ function loadConfig() {
     loudness: 'normal',
     ffmpegPath: '',
     autoReadback: true,
+    // AI 文字转语音（qq_speak）：系统 SAPI 合成，不依赖语音库预置音频。
+    tts: {
+      enabled: true,                 // AI 语音合成总开关
+      voice: 'Microsoft Huihui Desktop', // SAPI 音色（zh-CN 女声；装了别的可改）
+      maxChars: 400,                 // 单次合成文本上限（也防长文合成超时）
+      rate: 0                        // 语速 -10~10，0 为正常
+    },
     ...(cfg.socialV2?.voice ?? {})
   };
 
@@ -1753,6 +1760,74 @@ async function main() {
    * AI 通道入口：解析引用 → 限流 → 发送 → 记账 → 回读校验。
    * 返回 { messageId, detail, verified, readback }。
    */
+  // SAPI 文字转语音：PowerShell System.Speech 合成 WAV，直接落进语音库
+  // （tts-<stamp>.wav，发送后即删，不长期占用 qq_list_voices 列表）。
+  // 文本经 UTF-16LE EncodedCommand 传输 + PS 单引号转义，不拼接命令。
+  // 音色不存在时 SAPI 落到系统默认音色（不失败——中文系统默认即中文女声）。
+  async function synthesizeVoiceWav(text, options = {}) {
+    const vc = voiceCfg();
+    const tts = vc.tts ?? {};
+    if (tts.enabled === false) throw new Error('AI 语音合成已关闭（socialV2.voice.tts.enabled=false）');
+    const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, Math.max(50, Number(tts.maxChars) || 400));
+    if (!clean) throw new Error('要说的话不能为空');
+    const rate = Math.max(-10, Math.min(10, Number.isFinite(Number(options.rate)) ? Number(options.rate) : (Number(tts.rate) || 0)));
+    const voiceName = String(options.voice ?? tts.voice ?? 'Microsoft Huihui Desktop').slice(0, 80);
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // voiceCfg().dir 已解析为绝对路径（相对配置在 voiceCfg 里按仓库根拼接）
+    const outPath = path.join(vc.dir || path.join(ROOT, 'audio'), `tts-${stamp}.wav`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
+    const script = `
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try { $s.SelectVoice(${q(voiceName)}) } catch {}
+$s.Rate = ${rate}
+$s.SetOutputToWaveFile(${q(outPath)})
+$s.Speak(${q(clean)})
+$s.Dispose()
+Write-Output "done"
+`.trim();
+    const result = await new Promise((resolve) => {
+      const encoded = Buffer.from(script, 'utf16le').toString('base64');
+      const child = childSpawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => { try { child.kill(); } catch {} }, 90000);
+      child.stdout.on('data', (d) => { stdout += d; });
+      child.stderr.on('data', (d) => { stderr += d; });
+      child.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, error: `无法启动 powershell.exe：${error?.message ?? error}` }); });
+      child.on('close', () => {
+        clearTimeout(timer);
+        if (!/done/.test(stdout)) { resolve({ ok: false, error: stderr.trim() || stdout.trim() || 'TTS 合成失败' }); return; }
+        try {
+          const st = fs.statSync(outPath);
+          if (!st.size) { resolve({ ok: false, error: 'TTS 输出为空文件' }); return; }
+          resolve({ ok: true, size: st.size });
+        } catch {
+          resolve({ ok: false, error: 'TTS 未产出文件' });
+        }
+      });
+    });
+    if (!result.ok) {
+      try { fs.rmSync(outPath, { force: true }); } catch {}
+      throw new Error(`语音合成失败：${result.error}`);
+    }
+    return { path: outPath, name: `tts-${stamp}`, text: clean, bytes: result.size };
+  }
+
+  // 清掉语音库里超过 1 小时的 tts-* 残留（异常路径没删干净的兜底）。
+  function pruneTtsWav() {
+    try {
+      const dir = voiceCfg().dir || path.join(ROOT, 'audio');
+      const cutoff = Date.now() - 3600_000;
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.startsWith('tts-')) continue;
+        const full = path.join(dir, f);
+        try { if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full, { force: true }); } catch {}
+      }
+    } catch {}
+  }
+
   async function sendVoiceForV2(key, voiceRef, { label = '', verify = null, readback = false, audio = null } = {}) {
     const vc = voiceCfg();
     if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
@@ -5494,6 +5569,59 @@ async function main() {
           } catch (error) {
             // 额度只在真正发出后才记账（voiceBudgetCommit），所以失败路径无需回滚。
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+        // ── 文字转语音直发（qq_speak）：SAPI 合成 → 复用 sendVoiceForV2 全链路 ──
+        // 鉴权/限频/落地校验与 send-voice 完全一致；合成文件用完即删。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/speak-voice') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
+          if (voice.tts?.enabled === false) { sendJson({ ok: false, error: 'AI 语音合成已关闭（socialV2.voice.tts.enabled）' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_speak' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          pruneTtsWav();
+          let synth = null;
+          try {
+            // 额度预检：别让注定超限的请求先白跑一次 TTS 合成。
+            voiceBudgetCheck(key, voice);
+            synth = await synthesizeVoiceWav(body.text, { rate: body.rate, voice: body.voice });
+            const sent = await sendVoiceForV2(key, synth.name, {
+              label: body.label ? String(body.label).slice(0, 100) : `TTS：${synth.text.slice(0, 20)}`,
+              verify: body.verify,
+              readback: body.readback === true
+            });
+            sendJson({
+              ok: true,
+              key,
+              messageId: sent.messageId,
+              spoken: synth.text,
+              bytes: synth.bytes,
+              detail: sent.detail,
+              verified: sent.verification?.confirmed === true,
+              readback: sent.readback,
+              warnings: sent.warnings
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          } finally {
+            if (synth) { try { fs.rmSync(synth.path, { force: true }); } catch {} }
           }
           return;
         }
