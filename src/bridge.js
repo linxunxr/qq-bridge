@@ -582,9 +582,10 @@ function appendActivity(line) {
   appendActivityLog(`[${localClock()}] ${redactSensitiveText(String(line).replace(/[\r\n]+/g, ' '))}\n`);
 }
 
-// 读取角色/模式状态：{"role": "傲娇助手", "mode": "active"|"silent"}
+// 读取角色/模式状态：{"role": "傲娇助手", "mode": "active"|"silent", "perConv": {"group:123": "阿冷"}}
+// [local-patch] per-conversation role：perConv[convKey] 覆盖该会话的全局 role（convKey 形如 group:123 / private:456）
 function readRoleState() {
-  return readJsonSafe(ROLE_STATE_FILE, { role: null, mode: 'active' });
+  return readJsonSafe(ROLE_STATE_FILE, { role: null, mode: 'active', perConv: {} });
 }
 function writeRoleState(role, mode) {
   atomicWriteJson(ROLE_STATE_FILE, { role: role ?? null, mode: mode ?? 'active' });
@@ -4481,7 +4482,7 @@ async function main() {
             ok: true,
             key,
             time: new Date().toISOString(),
-            role: { name: roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
+            role: { name: (roleState.perConv && Object.prototype.hasOwnProperty.call(roleState.perConv, key) ? roleState.perConv[key] : null) ?? roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2(key) : currentRoleHint(key) },
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -8371,7 +8372,7 @@ async function main() {
     st.activeExitAt = now;
     // 先取消尚未触发的旧回复/补刀定时器，避免退场期间再冒出旧发言
     cancelSocialTimers(key);
-    const roleHint = currentRoleHint();
+    const roleHint = currentRoleHint(key);
     const promptText = buildActiveExitPrompt(key, roleHint);
     scheduleSocialReply(
       key, promptText,
@@ -8552,7 +8553,7 @@ async function main() {
               st.proactiveNextCheckAt = now + randInt(Number(cfg.social?.proactiveCheckMinMs ?? 2700000), Number(cfg.social?.proactiveCheckMaxMs ?? 5400000));
               if (Math.random() < Number(cfg.social?.proactiveProbability ?? 0.2)) {
                 enterActive(key);
-                const roleHint = currentRoleHint();
+                const roleHint = currentRoleHint(key);
                 const promptText = buildProactivePrompt(key, roleHint);
                 scheduleSocialReply(
                   key, promptText,
@@ -8668,7 +8669,7 @@ async function main() {
         log(`摘要投喂创建会话失败 (${k}): ${error?.message ?? error}`);
         continue;
       }
-      const roleHint = currentRoleHint();
+      const roleHint = currentRoleHint(k);
       const summaryText = `${roleHint ? roleHint + '\n\n' : ''}【群聊摘要】过去一段时间群里发生了这些（你未逐条参与）：\n${lines}\n\n【最近对话】\n${buildContextBlock(k)}\n\n你不需要回复，只需记住这些内容，后续聊天会更自然。`;
       const silentId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
       social.silentTurns.set(sessionId, [...(social.silentTurns.get(sessionId) ?? []), { id: silentId, ts: Date.now() }]);
@@ -8711,14 +8712,20 @@ async function main() {
   // 缓存 key 为两个文件的 mtime，mtime 未变时直接返回，避免每次同步读文件。
   let roleHintCache = { key: '', raw: '' };
   // 原始人格卡（按 mtime 缓存，不截断）。
-  function roleRawContent() {
+  // [local-patch] per-conversation role：传入 convKey 时优先取 perConv[convKey] 的角色
+  function roleRawContent(convKey) {
     try {
       const rs = readRoleState();
-      if (!rs.role) return '';
+      let roleName = rs.role;
+      if (convKey && rs.perConv && Object.prototype.hasOwnProperty.call(rs.perConv, convKey)) {
+        roleName = rs.perConv[convKey];
+      }
+      if (!roleName) return '';
       // 读取点也必须校验人格名：写入点（控制台 /role 命令）都过 sanitizeRoleName，
       // 但 state/current-role.json 是**用户可直接编辑**的文件。没有这道校验时，
       // {"role":"../../../../Users/Public/x"} 会让 roles/ 之外的文件被读进来并注入每一条提示词。
-      const safeName = sanitizeRoleName(rs.role);
+      // [local-patch] 校验对象是解析后的 roleName（可能是 perConv 覆盖值），perConv 的值同样只信白名单字符
+      const safeName = sanitizeRoleName(roleName);
       if (!safeName || safeName.includes('..')) return '';
       const roleFile = path.join(ROLES_DIR, safeName + '.md');
       const resolved = path.resolve(roleFile);
@@ -8743,13 +8750,14 @@ async function main() {
   }
   // 按仿真模式取用：先用标题里的 〔一代〕/〔二代〕 标记筛掉另一模式的专属小节，
   // **再**按上限截断——这样另一模式的内容不会白白占掉本次的注入预算。
-  function roleHintForMode(mode) {
-    const selected = selectRoleText(roleRawContent(), mode);
+  // [local-patch] convKey 透传，支持 perConv 按会话角色
+  function roleHintForMode(mode, convKey) {
+    const selected = selectRoleText(roleRawContent(convKey), mode);
     if (!selected) return '';
     return selected.length > roleInjectMaxChars ? truncateText(selected, roleInjectMaxChars) : selected;
   }
-  function currentRoleHint() {
-    return roleHintForMode('v1');
+  function currentRoleHint(convKey) {
+    return roleHintForMode('v1', convKey);
   }
 
   // 二代仿真模式专用角色提示：去掉一代的 [SILENT] / 空格分句等状态机指令，避免与工具协议冲突。
@@ -8839,9 +8847,9 @@ async function main() {
     return `第 ${bad.join('，')} 条之间像是把同一句话拆开了；如果两条拼起来才完整，请合并成一条，或把断点移到完整句子的边界。`;
   }
 
-  function currentRoleHintV2() {
+  function currentRoleHintV2(convKey) {
     // 先按 〔二代〕/〔一代〕 标记筛小节；下面的逐行过滤只是给「没标记的老卡片」兜底。
-    const raw = roleHintForMode('v2');
+    const raw = roleHintForMode('v2', convKey);
     if (!raw) return '';
     // 一代仿真模式专用指令整行过滤，避免污染二代工具协议。
     // 用 role-card.js 导出的那份（文件顶部已 import）：这里原先又抄了一份同源正则，
@@ -10031,7 +10039,7 @@ async function main() {
     }
 
     // 角色扮演提示注入（仅注入给 agent，不影响群友之间的正常对话语义）
-    const roleHint = currentRoleHint();
+    const roleHint = currentRoleHint(key);
 
     // 群聊里带发送者信息，私聊不用；角色提示注入到消息开头（agent 可见）；
     // 管理员消息带身份标记（供 agent 识别，但其权限仍受工具面硬限制）
@@ -10099,7 +10107,7 @@ async function main() {
 
       // 触发成功：进入活跃，贴最近上下文 + 当前消息 + 人格（仅此一次），让 AI 回复
       enterActive(key);
-      const roleHint = currentRoleHint();
+      const roleHint = currentRoleHint(key);
       const currentLine = (isOwner && kind === 'private') ? `【管理员】${sender}：${textContent}` : `${sender}：${textContent}`;
       const directionHint = textContent.includes('[引用') ? DIRECTION_HINT + '\n' : '';
       const replyInstruction = direct
