@@ -39,13 +39,8 @@ function decodeHtml(s) {
     .trim();
 }
 
-async function bingSearch(query) {
-  const url = new URL('https://cn.bing.com/search');
-  url.searchParams.set('q', query);
-  // 搜索也使用同一条受限传输链路，重定向必须重新校验，正文最多 512K 字符。
-  const res = await safeFetch(url.toString(), 512000);
-  if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`搜索服务 HTTP ${res.statusCode}`);
-  const html = res.body;
+// 从一次 Bing 响应里解析结果块；cn/www 两个前台共用，抽出函数供重试兜底复用。
+function parseBingResults(html) {
   const results = [];
   const blocks = html.split('<li class="b_algo"').slice(1);
   for (const block of blocks) {

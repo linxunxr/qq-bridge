@@ -15,7 +15,7 @@ function loadWebTools(safeFetch) {
     tool(name, description, schema, callback) { tools.set(name, { schema, callback }); }
     connect() {}
   }
-  vm.runInNewContext(source, { safeFetch, McpServer, StdioServerTransport: class {}, z, URL });
+  vm.runInNewContext(source, { safeFetch, McpServer, StdioServerTransport: class {}, z, URL, setTimeout, clearTimeout });
   return async (name, arguments_) => {
     const tool = tools.get(name);
     return tool.callback(z.object(tool.schema).parse(arguments_));
