@@ -57,6 +57,8 @@ const tests = [
   'test-mcp-tablet.mjs',
   // 电脑控制 MCP server：同 tablet 的静态断言 + stdio 冒烟（不动真鼠标键盘）。
   'test-mcp-pc.mjs',
+  // QQ 卡片消息（json/xml 段）文本化：标题/摘要/跳转链接提取，防回退成纯占位符。
+  'test-qq-card.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

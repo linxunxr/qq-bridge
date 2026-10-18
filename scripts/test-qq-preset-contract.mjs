@@ -14,7 +14,10 @@ const prefix = persona?.config?.prefix ?? '';
 test('reserved2 YAML resolves to the expected persona and template variables', () => {
   assert.equal(persona?.name, '@deepseek-ai/dsh-persona');
   assert.match(prefix, /\{\{model\}\}/);
-  assert.match(persona.config.suffix, /\{\{cwd\}\}/);
+  // {{cwd}} 在桌面端运行时未注册（2026-10-17 实测 unknown prompt variable 直接打断
+  // 回合），persona 里不允许再出现；suffix 字段已整体移除。
+  assert.doesNotMatch(prefix, /\{\{cwd\}\}/);
+  assert.equal(Object.hasOwn(persona.config, 'suffix'), false);
   assert.equal(Object.hasOwn(persona.config, 'text'), false);
 });
 

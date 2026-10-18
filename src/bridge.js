@@ -11,6 +11,7 @@ import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawn as childSpawn } from 'node:child_process';
+import { describeJsonCard, describeXmlCard } from './qq-card.js';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -1234,7 +1235,9 @@ async function segmentsToText(segments, options = {}) {
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      case 'json': out.push(describeJsonCard(d.data)); break;
+      // 老式 xml 卡片：同样文本化（标题/链接），抽不到内容回退占位符。
+      case 'xml': out.push(describeXmlCard(d.data)); break;
       // markdown：SnowLuma 1.14.9 的线上段落是 `{type:'markdown',data:{content}}`。
       // 上游 1.14.17+（commit 1934e4e7「include text alongside received markdown」）
       // 起还会带上 `data.text`。两个形状都读，这样将来升级 SnowLuma 运行时不会退化成
