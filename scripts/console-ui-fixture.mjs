@@ -433,7 +433,7 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             const preset = url.searchParams.get('preset') === 'qq-chat' ? 'qq-chat' : 'qq-chat-v2';
             return json({ ok: true, backups: [{ file: `${preset}.agent.cordis.yml.fixture`, mtime: Date.parse(timestamp) }] });
           }
-          case '/api/dsh/model': return json({
+          case '/api/dsh/model': if (method === 'POST') { const b = JSON.parse(body || '{}'); const ok = b.provider && b.model; state.dshProvider = ok ? b.provider : state.dshProvider; state.dshModel = ok ? b.model : state.dshModel; return ok ? json({ ok: true, provider: b.provider, model: b.model, hasReasoning: b.provider !== 'omniroute', effortHint: null }) : json({ ok: false, error: 'provider 和 model 不能为空' }, 400); } return json({
             provider: 'deepseek-official',
             model: 'deepseek-flash',
             reasoningEffort: state.dshEffort,
@@ -442,6 +442,10 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             default: 'max',
             providerDefault: 'high',
             catalogSource: 'dsh',
+            catalog: [
+              { id: 'omniroute', name: 'omniroute（本地聚合路由）', models: [{ id: 'high-availability', name: 'high-availability（omniroute 高可用路由）', hasReasoning: false }] },
+              { id: 'deepseek-official', name: 'DeepSeek', models: [{ id: 'deepseek-flash', name: 'DeepSeek-V41-Flash', hasReasoning: true }, { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', hasReasoning: true }] },
+            ],
             globalSideEffect: true,
           });
           case '/api/whitelist': return json(state.whitelist);

@@ -2441,7 +2441,15 @@ button:active:not(:disabled) {
     </section>
 <section id="section-dsh" data-page="overview" class="card span-all">
       <h2 data-note="下一条消息生效">DSH 模型与思考强度</h2>
-      <div class="meta">模型：<span id="dshModelText">-</span> ｜ 提供方：<span id="dshProviderText">-</span></div>
+      <div class="row" style="margin-top:6px">
+        <label style="flex:0 0 auto">提供方</label>
+        <select id="dshProviderSelect" style="flex:1 1 200px"></select>
+        <label style="flex:0 0 auto">模型</label>
+        <select id="dshModelSelect" style="flex:1 1 220px"></select>
+        <button id="dshModelSave">保存</button>
+        <span class="meta" id="dshModelMsg"></span>
+      </div>
+      <div class="meta" id="dshModelNote"></div>
       <div class="row" style="margin-top:10px">
         <label style="flex:0 0 auto">思考强度</label>
         <select id="dshEffortSelect" style="flex:0 1 220px"></select>
@@ -2928,8 +2936,37 @@ async function refreshSimPrompt() {
 async function refreshDshModel() {
   try {
     const r = await api('/api/dsh/model');
-    document.getElementById('dshModelText').textContent = r.model || '-';
-    document.getElementById('dshProviderText').textContent = r.provider || '-';
+    // 模型目录 → 提供方/模型两级联动下拉（目录不可用时退回提示文本）
+    const providerSel = document.getElementById('dshProviderSelect');
+    const modelSel = document.getElementById('dshModelSelect');
+    const catalog = r.catalog || [];
+    if (catalog.length) {
+      providerSel.replaceChildren();
+      for (const g of catalog) {
+        const el = document.createElement('option');
+        el.value = g.id;
+        el.textContent = g.name || g.id;
+        providerSel.appendChild(el);
+      }
+      const fillModels = () => {
+        const group = catalog.find((g) => g.id === providerSel.value);
+        modelSel.replaceChildren();
+        for (const m of (group?.models ?? [])) {
+          const el = document.createElement('option');
+          el.value = m.id;
+          el.textContent = m.name || m.id;
+          if (!m.hasReasoning) el.title = '该模型没有思考档位声明（路由别名），思考强度建议选「跟随默认（不指定）」';
+          modelSel.appendChild(el);
+        }
+      };
+      providerSel.onchange = fillModels;
+      providerSel.value = catalog.some((g) => g.id === r.provider) ? r.provider : catalog[0].id;
+      fillModels();
+      modelSel.value = r.model || '';
+      document.getElementById('dshModelNote').textContent = '切换对已有会话于下一条消息生效；会同时写入 DSH 的全局默认模型。';
+    } else {
+      document.getElementById('dshModelNote').textContent = '未能读取 DSH 模型目录，模型仅展示当前值；可修改 config.json 的 dsh.provider/dsh.model 后重启桥接。';
+    }
     const select = document.getElementById('dshEffortSelect');
     const labels = r.labels || {};
     select.replaceChildren();
@@ -3120,6 +3157,22 @@ document.getElementById('roleInjectMaxSave').addEventListener('click', async () 
 });
 
 // ── DSH 思考强度 ────────────────────────────────────────────────────────────
+document.getElementById('dshModelSave').addEventListener('click', async () => {
+  const provider = document.getElementById('dshProviderSelect').value;
+  const model = document.getElementById('dshModelSelect').value;
+  const msg = document.getElementById('dshModelMsg');
+  msg.textContent = '保存中…';
+  msg.className = 'meta';
+  const r = await api('/api/dsh/model', 'POST', { provider, model });
+  if (r.ok) {
+    msg.textContent = `✅ 已切换为 ${r.provider}/${r.model}，下一条消息生效${r.effortHint ? '；' + r.effortHint : ''}`;
+    msg.className = 'meta ok';
+  } else {
+    msg.textContent = '❌ ' + (r.error || '保存失败');
+    msg.className = 'meta err';
+  }
+});
+
 document.getElementById('dshEffortSave').addEventListener('click', async () => {
   const effort = document.getElementById('dshEffortSelect').value;
   const msg = document.getElementById('dshEffortMsg');

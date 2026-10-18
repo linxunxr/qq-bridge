@@ -4010,12 +4010,13 @@ Write-Output "done"
           let labels = {};
           let providerDefault = null;
           let catalogSource = 'fallback';
+          let catalog = null;
           try {
             if (!modelCatalogInFlight) {
               modelCatalogInFlight = withTimeout(fetchModelCatalog(), 3000, 'session/modelCatalog')
                 .finally(() => { modelCatalogInFlight = null; });
             }
-            const catalog = unwrap(await modelCatalogInFlight, 'session.modelCatalog');
+            catalog = unwrap(await modelCatalogInFlight, 'session/modelCatalog');
             const group = (catalog?.groups ?? []).find((g) => g?.id === provider);
             const entry = (group?.models ?? []).find((m) => m?.id === model);
             const efforts = entry?.reasoning?.efforts ?? [];
@@ -4051,10 +4052,65 @@ Write-Output "done"
             default: REASONING_EFFORT_DEFAULT,
             providerDefault,
             catalogSource,
+            // 模型目录（供控制台切换 provider/model）：hasReasoning=false 的模型没有
+            // 思考档位声明（路由别名），切过去时思考强度应配 none（或依赖自动降级）。
+            catalog: (catalog?.groups ?? []).map((g) => ({
+              id: g?.id ?? '',
+              name: g?.name ?? g?.id ?? '',
+              models: (g?.models ?? []).map((m) => ({
+                id: m?.id ?? '',
+                name: m?.name ?? m?.id ?? '',
+                hasReasoning: Array.isArray(m?.reasoning?.efforts) && m.reasoning.efforts.length > 0,
+              })),
+            })),
             // selectModel 会同时写会话级与 DSH 全局默认（~/.dsh/settings.yaml 的 agent-default-model），
             // 控制台要把这点明确告诉管理员，避免「只想调 QQ 助手却改了 Web GUI 新会话默认」的意外。
             globalSideEffect: true,
           });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/dsh/model') {
+          const body = await readBody();
+          const provider = String(body.provider ?? '').trim();
+          const model = String(body.model ?? '').trim();
+          if (!provider || !model) { sendJson({ ok: false, error: 'provider 和 model 不能为空' }, 400); return; }
+          // 只接受 DSH 模型目录里真实存在的组合——写错的模型会让每条消息的
+          // selectModel 恒败，会话全跑在 DSH 默认模型上（omniroute 那次就是教训）。
+          let entry = null;
+          let catalog = null;
+          try {
+            if (!modelCatalogInFlight) {
+              modelCatalogInFlight = withTimeout(fetchModelCatalog(), 3000, 'session/modelCatalog')
+                .finally(() => { modelCatalogInFlight = null; });
+            }
+            catalog = unwrap(await modelCatalogInFlight, 'session/modelCatalog');
+            const group = (catalog?.groups ?? []).find((g) => g?.id === provider);
+            entry = (group?.models ?? []).find((m) => m?.id === model) ?? null;
+          } catch (error) {
+            sendJson({ ok: false, error: `无法读取 DSH 模型目录来校验：${error?.message ?? error}` }, 503);
+            return;
+          }
+          if (!entry) {
+            const available = (catalog?.groups ?? []).map((g) => `${g.id}: ${(g?.models ?? []).map((m) => m.id).join(', ')}`).join('；');
+            sendJson({ ok: false, error: `模型目录中没有 ${provider}/${model}。可用：${available || '（空）'}` }, 400);
+            return;
+          }
+          const configFile = path.join(ROOT, 'config.json');
+          // fail-fast：配置损坏时直接 500，绝不回写（与白名单接口同语义）
+          const file = readConfigObject(configFile);
+          file.dsh = { ...(file.dsh ?? {}), provider, model };
+          atomicWriteJson(configFile, file);
+          cfg.dsh = { ...(cfg.dsh ?? {}), provider, model };
+          // 与思考强度切换同一机制：已在运行的会话在下一条消息重新 selectModel
+          modelSelectionEpoch += 1;
+          const hasReasoning = Array.isArray(entry?.reasoning?.efforts) && entry.reasoning.efforts.length > 0;
+          const effort = String(cfg.dsh?.reasoningEffort ?? REASONING_EFFORT_DEFAULT);
+          const hint = !hasReasoning && effort !== REASONING_EFFORT_NONE
+            ? '该模型没有思考档位声明，当前思考强度会在钉模时自动降级为「不指定」'
+            : null;
+          log(`控制台：DSH 模型已切换为 ${provider}/${model}（对已有会话于下一条消息生效）${hint ? '；' + hint : ''}`);
+          appendActivity(`控制台：DSH 模型切换为 ${provider}/${model}`);
+          sendJson({ ok: true, provider, model, hasReasoning, effortHint: hint });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/dsh/effort') {
